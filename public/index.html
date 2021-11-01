@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mediasoup Demo</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1>Mediasoup Demo</h1>
+
+    <p id="message">Enter room name</p>
+    <div id="roomInfo">
+        <input id="roomNum" type="text">
+        <button id="submit-button">Submit</button>
+    </div>
+
+    <div id="videos">
+        <video id="local" autoplay></video>
+    </div>
+
+    <div id="toggle-buttons">
+        <button id="toggle-video" onclick="toggleVideo()">Video On</button>
+        <button id="toggle-audio" onclick="toggleAudio()">Audio On</button>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="./bundle.js"></script>
+</body>
+</html>

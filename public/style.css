@@ -1,0 +1,50 @@
+body {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    background-color: rgb(30, 30, 30);
+    color: rgb(200, 200, 200);
+}
+
+#message {
+    font-size: 25px;
+    margin: 0 0 10px 0
+}
+
+#roomInfo input, button {
+    font-size: 20px;
+    padding: 5px 10px;
+    border-radius: 10px;
+}
+
+#roomInfo input {
+    color:red;
+}
+
+#videos {
+    display: none;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+}
+
+video {
+    width: 50%;
+    transform: scaleX(-1);
+    border-radius: 30px;
+    margin: 5px;
+}
+
+#toggle-buttons {
+    display: none;
+    margin: 10px;
+}
+
+#toggle-buttons button {
+    margin: 10px;
+}
+
+#toggle-video, #toggle-audio {
+    background-color: rgb(0, 255, 0);
+}
