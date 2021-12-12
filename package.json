@@ -4,7 +4,7 @@
   "description": "mediasoup test",
   "main": "server.js",
   "scripts": {
-    "start": "browserify public/script.js -o public/bundle.js; node server.js"
+    "start": "browserify public/script.js -o public/bundle.js; nodemon server.js"
   },
   "author": "Zoraiz",
   "license": "ISC",
