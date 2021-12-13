@@ -17,6 +17,7 @@ let worker
 
 const createWorker = async () => {
     worker = await mediasoup.createWorker({
+        logLevel: 'error',
         rtcMinPort: 10000,
         rtcMaxPort: 59999,
     })
@@ -76,6 +77,7 @@ io.on('connection', async (socket) => {
         if (routers[room]) {
             isCreator = false
         } else {
+
             let newRouter = await worker.createRouter({ mediaCodecs })
             routers[room] = newRouter
 
@@ -84,38 +86,34 @@ io.on('connection', async (socket) => {
             console.log('New router added', routers)
         }
 
+        socket.join(room)
+
         io.to(socket.id).emit('rtp-capabilities', {
             rtpCapabilities: routers[room].rtpCapabilities,
             isCreator
         })
     })
 
-    socket.on('web-rtc-transport', async ({ sender, room }, callback) => {
-        if (sender) {
-            transports[room] = {
-                ...transports[room],
-                [socket.id]: {
-                    producerTransport: await createWebRtcTransport(room, socket.id, callback)
-                }
-            }
-        } else {
-            transports[room] = {
-                ...transports[room],
-                [socket.id]: {
-                    consumerTransport: await createWebRtcTransport(room, socket.id, callback)
-                }
+    socket.on('web-rtc-transport', async ({ room }, callback) => {
+        transports[room] = {
+            ...transports[room],
+            [socket.id]: {
+                producerTransport: await createWebRtcTransport(room, socket.id, callback)
             }
         }
 
         console.log('transports', transports)
     })
 
-    socket.on('transport-connect', async ({ dtlsParameters, isCreator, room }) => {
+    socket.on('transport-connect', async ({ dtlsParameters, consumerId, isConsumer, room }) => {
         console.log('dtlsParameters recieved from socket', socket.id)
-        if(isCreator)
+        
+        if(isConsumer) {
+            await transports[room][socket.id].consumersList[consumerId].consumerTransport.connect({ dtlsParameters })
+
+        } else {
             await transports[room][socket.id]['producerTransport'].connect({ dtlsParameters })
-        else
-            await transports[room][socket.id]['consumerTransport'].connect({ dtlsParameters })
+        }
     })
 
     socket.on('transport-produce', async ({ room, kind, rtpParameters, appData }, callback) => {
@@ -131,27 +129,66 @@ io.on('connection', async (socket) => {
             socketProducer.close()
         })
 
+        // Inform everyone of new participant, and new participant of other participants
+        // AFTER new participant's producer has been made on server and locally
+        let otherParticipants = []
+
+        otherParticipants = Object.keys(transports[room]).filter(id => id !== socket.id);
+
+        if(otherParticipants.length > 0) {
+            // Send list of participants to
+            io.to(socket.id).emit('other-participants', { otherParticipants })
+    
+            otherParticipants.forEach(socketId => {
+                io.to(socketId).emit('new-participant', {
+                    participantSocketId: socket.id
+                })
+            })
+        }
+
         console.log('transports', transports)
 
         callback({ id: socketProducer.id })
     })
 
-    socket.on('consume', async({ rtpCapabilities, room }, callback) => {
+    socket.on('consume-participant', async({ rtpCapabilities, participantSocketId, room }, callback) => {
         try {
-            let producerSocketId = Object.keys(transports[room]).filter(item => item !== socket.id)
-            let producer = transports[room][producerSocketId]['producer']
+            let producer = transports[room][participantSocketId]['producer']
             
             if(routers[room].canConsume({
                 producerId: producer.id,
                 rtpCapabilities
             })) {
-                transports[room][socket.id]['consumer'] = await transports[room][socket.id]['consumerTransport'].consume({
+
+                if( !transports[room][socket.id].consumersList ) {
+                    transports[room][socket.id] = {
+                        ...transports[room][socket.id],
+                        consumersList: {}
+                    }
+                }
+
+                let tempConsumerTransport = await createWebRtcTransport(room, socket.id, undefined)
+
+                let tempConsumerTransportParams = {
+                    id: tempConsumerTransport.id,
+                    iceParameters: tempConsumerTransport.iceParameters,
+                    iceCandidates: tempConsumerTransport.iceCandidates,
+                    dtlsParameters: tempConsumerTransport.dtlsParameters,
+                }
+
+                let tempConsumer = await tempConsumerTransport.consume({
                     producerId: producer.id,
                     rtpCapabilities,
                     paused: true
                 })
 
-                let tempConsumer = transports[room][socket.id]['consumer']
+                transports[room][socket.id].consumersList = {
+                    ...transports[room][socket.id].consumersList,
+                    [tempConsumer.id]: {
+                        consumerTransport: tempConsumerTransport,
+                        consumer: tempConsumer,
+                    }
+                }
 
                 tempConsumer.on('transportclose', () => {
                     console.log('Transport for', socket.id, 'has closed')
@@ -161,13 +198,6 @@ io.on('connection', async (socket) => {
                     console.log('Producer of', socket.id, 'consumer has closed')
                 })
 
-                const params = {
-                    id: tempConsumer.id,
-                    producerId: producer.id,
-                    kind: tempConsumer.kind,
-                    rtopParameters: tempConsumer.rtpParameters
-                }
-
                 console.log('Consumer', tempConsumer.id, 'created')
                 console.log('transports', transports)
 
@@ -176,7 +206,8 @@ io.on('connection', async (socket) => {
                         id: tempConsumer.id,
                         producerId: producer.id,
                         kind: tempConsumer.kind,
-                        rtpParameters: tempConsumer.rtpParameters
+                        rtpParameters: tempConsumer.rtpParameters,
+                        consumerTransportParams: tempConsumerTransportParams,
                     }
                 })
             }
@@ -191,12 +222,16 @@ io.on('connection', async (socket) => {
         }
     })
 
-    socket.on('consumer-resume', async({ room }) => {
-        transports[room][socket.id]['consumer'].resume()
+    socket.on('consumer-resume', async({ consumerId, room }) => {
+        transports[room][socket.id].consumersList[consumerId].consumer.resume()
     })
 
     socket.on('disconnect', () => {
         console.log(socket.id, 'disconnected')
+
+        Object.keys(transports).forEach(room => {
+            delete transports[room][socket.id]
+        })
     })
 })
 
@@ -227,15 +262,16 @@ const createWebRtcTransport = async (room, currSocketId, callback) => {
             console.log('Transport', transport.id, 'closed')
         })
 
-        callback({
-            params: {
-                id: transport.id,
-                iceParameters: transport.iceParameters,
-                iceCandidates: transport.iceCandidates,
-                dtlsParameters: transport.dtlsParameters,
-                // otherSocketIds: Object.keys(transports[room]).filter(id => id !== currSocketId)
-            }
-        })
+        if(callback) {
+            callback({
+                params: {
+                    id: transport.id,
+                    iceParameters: transport.iceParameters,
+                    iceCandidates: transport.iceCandidates,
+                    dtlsParameters: transport.dtlsParameters,
+                }
+            })
+        }
 
         return transport
 

@@ -10820,10 +10820,9 @@ let device
 let routerRtpCapabilities
 let producerTransport
 let localProducer
+let localStream
 let isCreator
-let consumers = []
-let consumerTransport
-let consumer
+let consumers = {}
 
 socket.on('connected', ({ socketId }) => {
     console.log(socketId)
@@ -10871,6 +10870,7 @@ submitButton.onclick = async() => {
 
     try {
         let stream = await navigator.mediaDevices.getUserMedia(mediaConstraints)
+        localStream = stream
         localVideo.srcObject = stream
         localVideo.muted = true
     
@@ -10898,11 +10898,11 @@ socket.on('rtp-capabilities', async(data) => {
 
 const createDevice = async() => {
     device = new mediasoupClient.Device()
-    await device.load({ routerRtpCapabilities: routerRtpCapabilities })
+    await device.load({ routerRtpCapabilities })
 
     console.log('Device created', device)
 
-    socket.emit('web-rtc-transport', { sender: isCreator, room: roomName }, async({ params }) => {
+    socket.emit('web-rtc-transport', { room: roomName }, async({ params }) => {
         // Callback fires when we get transport parameters on the server-side after it's created
         if(params.error) {
             console.log(params.error)
@@ -10912,58 +10912,94 @@ const createDevice = async() => {
         console.log('Router transport params recieved', params)
 
         console.log('isCreator', isCreator)
-        if(isCreator) {
-            // Create local send transport
-            producerTransport = await device.createSendTransport(params)
-            assignProducerTransportEvents()
-            console.log('producerTransport', producerTransport)
 
-            localProducer = await producerTransport.produce(globalParams)
-            assignProducerEvents()
-            console.log('localProducer', localProducer)
+        // Create local send transport
+        producerTransport = await device.createSendTransport(params)
+        assignProducerTransportEvents()
+        console.log('producerTransport', producerTransport)
 
-        } else {
-            let tempConsumer = {}
-            // Create receive send transport
-            tempConsumer['consumerTransport'] = await device.createRecvTransport(params)
-            assignConsumerTransportEvents(tempConsumer.consumerTransport)
-            console.log('consumerTransport', tempConsumer.consumerTransport)
-
-            await socket.emit('consume', { rtpCapabilities: device.rtpCapabilities, room: roomName }, async({ params }) => {
-                if(params && params.error) {
-                    console.log(params.error)
-                    return
-                }
-        
-                console.log('Received params after \'consume\'', params)
-
-                tempConsumer['consumer'] = await tempConsumer.consumerTransport.consume({
-                    id: params.id,
-                    producerId: params.producerId,
-                    kind: params.kind,
-                    rtpParameters: params.rtpParameters
-                })
-                consumers.push(tempConsumer)
-                console.log('consumers array', consumers)
-
-                const { track } = tempConsumer.consumer;
-
-                console.log('Recieved track', track)
-    
-                let remoteVid = document.createElement('video')
-                remoteVid.srcObject = new MediaStream([track]);
-                remoteVid.id = params.producerId
-                remoteVid.autoplay = true
-
-                videoFeed.appendChild(remoteVid)
-
-                socket.emit('consumer-resume', { room: roomName })
-            })
-        }
-
+        localProducer = await producerTransport.produce(globalParams)
+        assignProducerEvents()
+        console.log('localProducer', localProducer)
     })
 }
 
+socket.on('new-participant', async({ participantSocketId }) => {
+    console.log('New participant', participantSocketId)
+    consumeParticipant(participantSocketId)
+})
+
+socket.on('other-participants', async({ otherParticipants }) => {
+
+    for(let i = 0; i < otherParticipants.length; i++) {
+        consumeParticipant(otherParticipants[i])
+    }
+})
+
+let x = 0;
+
+const consumeParticipant = async(participantSocketId) => {
+
+    console.log('x', x)
+    
+    await socket.emit('consume-participant', {
+        rtpCapabilities: device.rtpCapabilities,
+        participantSocketId,
+        room: roomName,
+    
+    }, async({ params }) => {
+        if(params && params.error) {
+            console.log(params.error)
+            return
+        }
+
+        let tempConsumer = {}
+        // Create receive send transport
+        tempConsumer['consumerTransport'] = await device.createRecvTransport(params.consumerTransportParams)
+        assignConsumerTransportEvents(tempConsumer.consumerTransport, params.id)
+
+        console.log('Received params for server-side consumer for socket', participantSocketId)
+
+        tempConsumer['consumer'] = await tempConsumer.consumerTransport.consume({
+            id: params.id,
+            producerId: params.producerId,
+            kind: params.kind,
+            rtpParameters: params.rtpParameters
+        })
+
+        consumers[params.producerId] = tempConsumer
+        console.log('consumers array', consumers)
+
+        const { track } = tempConsumer.consumer;
+
+        console.log('Recieved track for producer '+params.producerId, track)
+
+        let remoteVid = document.createElement('video')
+        remoteVid.srcObject = new MediaStream([track]);
+        remoteVid.id = params.producerId
+        remoteVid.autoplay = true
+
+        remoteVid.onloadedmetadata = () => {
+            
+            let vidWidth = 100 / (videoFeed.childElementCount + 1)
+            let allVideos = document.getElementsByTagName("video")
+    
+            for(let i = 0; i < allVideos.length; i++) {
+                allVideos[i].style.width = vidWidth + "%"
+            }
+    
+            remoteVid.style.width = vidWidth + "%"
+        }
+
+        videoFeed.appendChild(remoteVid)
+
+        // Tell server to resume this specific consumer
+        await socket.emit('consumer-resume', {
+            consumerId: params.id,
+            room: roomName
+        })
+    })
+}
 
 const assignProducerTransportEvents = () => {
     producerTransport.on('connect', async({ dtlsParameters }, callback, errback) => {
@@ -10973,7 +11009,7 @@ const assignProducerTransportEvents = () => {
                 // transportId: producerTransport.id,
                 dtlsParameters,
                 room: roomName,
-                isCreator
+                isConsumer: false,
             })
 
             // Tell the local transport that paramters were submitted to server-side
@@ -11017,7 +11053,7 @@ const assignProducerEvents = () => {
     })
 }
 
-const assignConsumerTransportEvents = (consumerTransport) => {
+const assignConsumerTransportEvents = (consumerTransport, consumerId) => {
     
     consumerTransport.on('connect', async({ dtlsParameters }, callback, errback) => {
         try {
@@ -11025,7 +11061,8 @@ const assignConsumerTransportEvents = (consumerTransport) => {
             await socket.emit('transport-connect', {
                 dtlsParameters,
                 room: roomName,
-                isCreator
+                isConsumer: true,
+                consumerId,
             })
 
             // Tell the local transport that paramters were submitted to server-side
@@ -11037,14 +11074,14 @@ const assignConsumerTransportEvents = (consumerTransport) => {
 }
 
 const assignConsumerEvents = (consumer) => {
-    localProducer.on('trackended', () => {
+    localProducer.on('trackended', (e) => {
         // Close video track
-        console.log('Track ended...')
+        console.log('Track ended...', e)
     })
 
-    localProducer.on('transportclose', () => {
+    localProducer.on('transportclose', (e) => {
         // Close video track
-        console.log('Transport closed...')
+        console.log('Transport closed...', e)
     })
 }
 
